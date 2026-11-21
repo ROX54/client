@@ -5,6 +5,7 @@
   const root = document.getElementById('builder');
   const viewport = id('viewport');
   const canvas = id('canvas');
+  const plane = id('plane');
   const svg = 'http://www.w3.org/2000/svg';
   const groups = {
     trigger: ['Триггеры', '↯'], scanner: ['Анализаторы', '⌕'],
@@ -21,6 +22,12 @@
   let shownState = '';
   let shownHistory = '';
   let polling = false;
+  let zoom = 1;
+  let framePending = false;
+  let panMode = false;
+  let panning = null;
+  let historyRows = [];
+  let historySelection = 0;
   const runLabels = {
     queued: 'В очереди', pending: 'Ожидает', running: 'Выполняется', success: 'Завершено',
     partial: 'Частично завершено', failed: 'Ошибка', skipped: 'Пропущено', interrupted: 'Прервано',
@@ -124,7 +131,7 @@
 
   function canvasPoint(clientX, clientY) {
     const frame = canvas.getBoundingClientRect();
-    return {x: clientX - frame.left, y: clientY - frame.top};
+    return {x: (clientX - frame.left) / zoom, y: (clientY - frame.top) / zoom};
   }
 
   function addNode(type, x, y) {
@@ -162,12 +169,12 @@
         });
         tile.addEventListener('dragend', () => canvas.classList.remove('wf-dropping'));
         tile.addEventListener('click', () => {
-          let x = viewport.scrollLeft + 28;
-          let y = viewport.scrollTop + 30;
+          let x = viewport.scrollLeft / zoom + 28;
+          let y = viewport.scrollTop / zoom + 30;
           while (graph.nodes.some(node => Math.abs(node.x - x) < 192 && Math.abs(node.y - y) < 108)
                  && y < library.limits.coordinate) y += 112;
           addNode(type, x, y);
-          viewport.scrollTop = Math.max(viewport.scrollTop, y + 112 - viewport.clientHeight);
+          viewport.scrollTop = Math.max(viewport.scrollTop, (y + 112) * zoom - viewport.clientHeight);
         });
         id('library').append(tile);
       }
@@ -223,8 +230,26 @@
   }
 
   function fitCanvas() {
-    canvas.style.width = Math.max(viewport.clientWidth, ...graph.nodes.map(node => node.x + 226)) + 'px';
-    canvas.style.height = Math.max(viewport.clientHeight, ...graph.nodes.map(node => node.y + 148)) + 'px';
+    const width = Math.max(viewport.clientWidth / zoom, ...graph.nodes.map(node => node.x + 226));
+    const height = Math.max(viewport.clientHeight / zoom, ...graph.nodes.map(node => node.y + 148));
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+    plane.style.width = Math.ceil(width * zoom) + 'px';
+    plane.style.height = Math.ceil(height * zoom) + 'px';
+  }
+
+  function setZoom(wanted) {
+    const next = Math.max(0.5, Math.min(1.6, Math.round(wanted * 100) / 100));
+    const centerX = viewport.clientWidth / 2;
+    const centerY = viewport.clientHeight / 2;
+    const x = (viewport.scrollLeft + centerX) * next / zoom - centerX;
+    const y = (viewport.scrollTop + centerY) * next / zoom - centerY;
+    zoom = next;
+    canvas.style.transform = 'scale(' + zoom + ')';
+    id('zoom-reset').textContent = Math.round(zoom * 100) + '%';
+    fitCanvas();
+    viewport.scrollTo(x, y);
+    drawEdges();
   }
 
   function portElement(nodeId, side, port) {
@@ -251,6 +276,7 @@
       if (!positions.has(key)) positions.set(key, pinPosition(node, side, port));
       return positions.get(key);
     }
+    const branches = new Map((currentRun?.nodes || []).filter(node => node.branch).map(node => [node.id, node.branch]));
     for (const edge of graph.edges) {
       const from = position(edge.source, 'out', edge.sourcePort);
       const to = position(edge.target, 'in', edge.targetPort);
@@ -258,6 +284,9 @@
       const path = line(from, {x: to.x - 8, y: to.y});
       const wire = document.createElementNS(svg, 'path');
       wire.setAttribute('class', selected === edge ? 'wf-wire is-selected' : 'wf-wire');
+      if (branches.has(edge.source) && edge.sourcePort !== branches.get(edge.source)) {
+        wire.classList.add('is-inactive-branch');
+      }
       wire.setAttribute('d', path);
       wire.dataset.port = edge.sourcePort;
       const hit = document.createElementNS(svg, 'path');
@@ -276,6 +305,15 @@
       fragment.append(wire, hit);
     }
     id('edges').replaceChildren(fragment);
+  }
+
+  function queueWireDraw() {
+    if (framePending) return;
+    framePending = true;
+    requestAnimationFrame(() => {
+      framePending = false;
+      drawEdges();
+    });
   }
 
   function edgeLabel(edge) {
@@ -348,10 +386,19 @@
       card.classList.toggle('is-selected', card.dataset.node === selected?.id);
     }
     id('nodes').querySelector('.is-connecting')?.classList.remove('is-connecting');
+    viewport.classList.toggle('is-linking', Boolean(connection));
+    for (const port of id('nodes').querySelectorAll('[data-side="in"]')) {
+      const target = findNode(port.closest('[data-node]').dataset.node);
+      const source = connection && findNode(connection.source);
+      const compatible = source && library.nodeTypes[target.type].inputs[port.dataset.port].types
+        .includes(library.nodeTypes[source.type].outputs[connection.sourcePort].type);
+      port.classList.toggle('is-compatible', Boolean(compatible && !canReach(target.id, source.id)));
+    }
     if (connection) portElement(connection.source, 'out', connection.sourcePort)?.classList.add('is-connecting');
     else id('preview').setAttribute('visibility', 'hidden');
     drawEdges();
     renderInspector();
+    paintSelectedNode();
   }
 
   function select(item) {
@@ -479,6 +526,7 @@
 
   function syncRunButton() {
     id('run').disabled = busy || !storedId || dirty;
+    id('archive').disabled = busy || !storedId;
     id('run').title = dirty || !storedId ? 'Сохраните изменения перед запуском' : 'Запустить сохранённый workflow';
   }
 
@@ -506,15 +554,47 @@
     return runLabels[node.status] + branch;
   }
 
+  function packetLabel(packet) {
+    const categories = Object.entries(packet.categories || {}).map(([name, count]) => name + ' ' + count).join(', ');
+    return [kinds[packet.type], categories || (packet.type !== 'start' ? '0 находок' : ''),
+            packet.analysisCount ? 'AI: ' + packet.analysisCount : ''].filter(Boolean).join(' · ');
+  }
+
+  function paintSelectedNode() {
+    const panel = id('node-result');
+    const state = currentRun?.nodes.find(node => node.id === selected?.id && node.type === selected?.type);
+    panel.hidden = !state;
+    panel.replaceChildren();
+    if (!state) return;
+    panel.append(element('h3', null, 'Результат ноды'));
+    const status = element('p', 'wf-packet', [nodeRunLabel(state),
+      state.durationMs == null ? '' : state.durationMs + ' мс',
+      state.findingCount == null ? '' : 'Находок: ' + state.findingCount].filter(Boolean).join(' · '));
+    status.dataset.runState = state.status;
+    panel.append(status);
+    for (const item of state.inputs || []) {
+      panel.append(element('p', 'wf-packet', 'Вход ← ' + item.nodeId + ' · ' + packetLabel(item)));
+    }
+    for (const item of state.outputs || []) {
+      const port = library.nodeTypes[state.type].outputs[item.port]?.label || item.port;
+      panel.append(element('p', 'wf-packet', 'Выход ' + port + ' → ' + packetLabel(item)));
+    }
+    if (state.delivery) panel.append(element('p', null, deliveryLabel(state.delivery)));
+    if (state.message) panel.append(element('p', null, state.message));
+  }
+
   function paintRun() {
     const states = new Map((currentRun?.nodes || []).map(node => [node.id, node]));
     for (const card of id('nodes').children) {
       const state = states.get(card.dataset.node);
       const label = card.querySelector('.wf-run-node');
       label.hidden = !state;
-      label.textContent = state ? nodeRunLabel(state) : '';
+      label.textContent = state ? [nodeRunLabel(state),
+        state.durationMs == null ? '' : state.durationMs + ' мс',
+        state.findingCount == null ? '' : state.findingCount + ' находок'].filter(Boolean).join(' · ') : '';
       card.dataset.runState = state?.status || '';
     }
+    paintSelectedNode();
   }
 
   function showRun(run) {
@@ -523,6 +603,7 @@
     shownState = signature;
     currentRun = run;
     paintRun();
+    drawEdges();
     const panel = id('run-details');
     panel.replaceChildren();
     if (!run) {
@@ -534,10 +615,16 @@
       localTime(run.startedAt || run.queuedAt), 'Находок: ' + run.findingCount,
       run.durationMs == null ? '' : run.durationMs + ' мс',
     ].filter(Boolean).join(' · ');
+    panel.append(runNodeList(run));
+    return true;
+  }
+
+  function runNodeList(run) {
     const list = element('ul', 'wf-run-list');
     for (const node of run.nodes) {
       const title = library.nodeTypes[node.type]?.title || node.type;
       const description = [nodeRunLabel(node), node.durationMs == null ? '' : node.durationMs + ' мс',
+                           node.findingCount == null ? '' : 'находок ' + node.findingCount,
                            node.delivery ? deliveryLabel(node.delivery) : '', node.message || '']
         .filter(Boolean).join(' · ');
       const item = element('li', null, title + ' (' + node.id + ') · ' + description);
@@ -549,12 +636,19 @@
       item.dataset.runState = 'failed';
       list.append(item);
     }
-    panel.append(list);
-    return true;
+    return list;
   }
 
-  function showRunResults(run, result) {
+  function showRunResults(run, result, target = id('run-details')) {
     const panel = element('div', 'wf-run-results');
+    if (!['queued', 'running'].includes(run.status) && !Object.keys(result.reports).length) {
+      panel.append(element('h3', null, 'Экспорт находок запуска'));
+      for (const [name, file] of [['JSON', 'findings.json'], ['Markdown', 'report.md']]) {
+        const link = element('a', null, 'Скачать ' + name);
+        link.href = '/api/workflow-runs/' + run.runId + '/exports/' + file;
+        panel.append(link);
+      }
+    }
     for (const [nodeId, analysis] of Object.entries(result.analyses || {})) {
       panel.append(element('h3', null, 'AI Analysis · ' + nodeId),
                    element('p', null, analysis.provider + ' · ' + analysis.model + ' · '
@@ -596,7 +690,7 @@
       details.append(rows);
       panel.append(details);
     }
-    id('run-details').append(panel);
+    target.append(panel);
   }
 
   function deliveryLabel(receipt) {
@@ -617,6 +711,8 @@
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
       } : undefined);
       const data = await response.json();
+      id('ai-config').dataset.runState = check
+        ? (data.connected ? 'success' : 'failed') : (data.configured ? '' : 'skipped');
       id('ai-config').textContent = [
         data.provider || 'Провайдер не настроен', data.model || '', data.message || '',
       ].filter(Boolean).join(' · ');
@@ -690,8 +786,110 @@
     }
   }
 
+  async function archiveWorkflow() {
+    if (!storedId || busy) return;
+    const warning = dirty ? ' Несохранённые изменения открытого графа будут потеряны.' : '';
+    if (!window.confirm('Переместить workflow в архив? История запусков сохранится.' + warning)) return;
+    setBusy(true);
+    try {
+      await request('/api/workflows/' + storedId + '/archive', {});
+      replaceGraph(emptyGraph(), null);
+      await updateSaved();
+      feedback('Workflow перемещён в архив.', 'success');
+    } catch (error) {
+      feedback('Не удалось обновить список workflow.', 'error', error.details || [error.message]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function renderHistory() {
+    const status = id('history-status').value;
+    const date = id('history-date').value;
+    const rows = historyRows.filter(run => {
+      const local = new Date(run.startedAt || run.queuedAt);
+      const day = [local.getFullYear(), local.getMonth() + 1, local.getDate()]
+        .map(value => String(value).padStart(2, '0')).join('-');
+      return (!status || run.status === status) && (!date || day === date);
+    });
+    id('history-rows').replaceChildren(...rows.map(run => {
+      const tr = element('tr');
+      const open = button('wf-check', 'Открыть');
+      open.setAttribute('aria-label', 'Открыть запуск «' + (run.workflowName || run.workflowId) + '»');
+      open.addEventListener('click', () => openHistoryRun(run.runId));
+      const flag = element('span', 'wf-history-state', runLabels[run.status]);
+      flag.dataset.runState = run.status;
+      const values = [run.workflowName || run.workflowId, localTime(run.startedAt || run.queuedAt), flag,
+                      run.durationMs == null ? '—' : run.durationMs + ' мс', run.findingCount, open];
+      for (const value of values) {
+        const cell = element('td');
+        cell.append(typeof value === 'object' ? value : String(value));
+        tr.append(cell);
+      }
+      return tr;
+    }));
+    id('history-feedback').textContent = rows.length ? 'Запусков: ' + rows.length : 'По этим условиям запусков нет.';
+  }
+
+  async function loadHistory() {
+    const control = id('history-refresh');
+    if (control.disabled) return;
+    control.disabled = true;
+    id('history-feedback').textContent = 'Загрузка истории…';
+    try {
+      const {runs} = await request('/api/workflow-runs');
+      historyRows = runs;
+      renderHistory();
+    } catch {
+      id('history-feedback').textContent = 'Не удалось загрузить историю. Проверьте соединение с Dashboard.';
+    } finally {
+      control.disabled = false;
+    }
+  }
+
+  async function openHistoryRun(runId) {
+    const version = ++historySelection;
+    const box = id('history-detail');
+    box.hidden = false;
+    box.replaceChildren(element('p', null, 'Загрузка результатов…'));
+    try {
+      const path = '/api/workflow-runs/' + runId;
+      const [run, result] = await Promise.all([request(path), request(path + '/results')]);
+      if (version !== historySelection) return;
+      box.replaceChildren(element('h2', null, run.workflowName),
+        element('p', null, runLabels[run.status] + ' · ' + localTime(run.startedAt || run.queuedAt)),
+        runNodeList(run));
+      showRunResults(run, result, box);
+      box.scrollIntoView({block: 'nearest'});
+    } catch {
+      if (version === historySelection) box.replaceChildren(element('p', null, 'Результаты запуска недоступны.'));
+    }
+  }
+
   function bindEvents() {
     const mime = 'application/x-cybergarden-node';
+    id('zoom-in').addEventListener('click', () => setZoom(zoom + 0.1));
+    id('zoom-out').addEventListener('click', () => setZoom(zoom - 0.1));
+    id('zoom-reset').addEventListener('click', () => setZoom(1));
+    id('pan').addEventListener('click', event => {
+      panMode = !panMode;
+      event.currentTarget.setAttribute('aria-pressed', String(panMode));
+      viewport.classList.toggle('is-panning', panMode);
+    });
+    viewport.addEventListener('pointerdown', event => {
+      if (!(event.button === 1 || (panMode && event.button === 0)) || event.target.closest('.wf-node,.wf-wire-hit')) return;
+      event.preventDefault();
+      panning = {id: event.pointerId, x: event.clientX + viewport.scrollLeft, y: event.clientY + viewport.scrollTop};
+      viewport.setPointerCapture(event.pointerId);
+    });
+    viewport.addEventListener('pointermove', event => {
+      if (panning?.id === event.pointerId) viewport.scrollTo(panning.x - event.clientX, panning.y - event.clientY);
+    });
+    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+      viewport.addEventListener(name, event => {
+        if (panning?.id === event.pointerId) panning = null;
+      });
+    }
     viewport.addEventListener('dragover', event => {
       if (!event.dataTransfer.types.includes(mime)) return;
       event.preventDefault();
@@ -717,7 +915,7 @@
         card.style.left = node.x + 'px';
         card.style.top = node.y + 'px';
         fitCanvas();
-        drawEdges();
+        queueWireDraw();
       } else if (connection) {
         const from = pinPosition(connection.source, 'out', connection.sourcePort);
         if (from) {
@@ -777,7 +975,14 @@
     id('validate').addEventListener('click', () => validateOrSave(false));
     id('save').addEventListener('click', () => validateOrSave(true));
     id('run').addEventListener('click', startExecution);
+    id('archive').addEventListener('click', archiveWorkflow);
     id('ai-check').addEventListener('click', () => aiConfiguration(true));
+    id('history-refresh').addEventListener('click', loadHistory);
+    id('history-status').addEventListener('change', renderHistory);
+    id('history-date').addEventListener('change', renderHistory);
+    document.addEventListener('dashboard:view', event => {
+      if (event.detail === 'history') loadHistory();
+    });
     id('run-history').addEventListener('change', event => {
       runVersion += 1;
       pinnedRun = event.target.value;
