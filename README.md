@@ -2,6 +2,8 @@
 
 Статический frontend Dashboard с редактором workflow, просмотром запусков, находок, отчётов, AI-анализа и статуса webhook. Сборка и npm не требуются.
 
+В Edge подтверждено отображение рекомендаций Groq `openai/gpt-oss-20b` для **15/15** находок. AI Analysis занял **4,22 с**, весь Full Security Audit — **5,69 с**. Локальный webhook подтвердил доставку ответом **HTTP 200**. [Сценарий записи на 80 секунд](https://github.com/ROX54/server/blob/main/DEMO-GUIDE.md#запись-экрана-на-80-секунд-без-микрофона).
+
 ## Запуск
 
 Склонируйте [client](https://github.com/ROX54/client) и [server](https://github.com/ROX54/server) рядом. Запустите `START-DASHBOARD.bat` или `./START-DASHBOARD.sh` из каталога `server` и откройте [127.0.0.1:8765](http://127.0.0.1:8765). Для отдельного расположения клиента задайте `CYBERGARDEN_CLIENT_DIR` на сервере.
