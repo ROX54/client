@@ -7,3 +7,5 @@
 Склонируйте [client](https://github.com/ROX54/client) и [server](https://github.com/ROX54/server) рядом. Запустите `START-DASHBOARD.bat` или `./START-DASHBOARD.sh` из каталога `server` и откройте [127.0.0.1:8765](http://127.0.0.1:8765). Для отдельного расположения клиента задайте `CYBERGARDEN_CLIENT_DIR` на сервере.
 
 Клиент отправляет относительные запросы на `/api/` и `/reports/`. При раздельном размещении настройте обратный прокси того же origin для этих путей на Python backend. Страница открывается через HTTP вместе с подключённым API. Настройки провайдеров и ключи хранятся на стороне сервера.
+
+В Workflow Builder выберите **Full Security Audit**. Поле «Учебный репозиторий» принимает разрешённую сервером ссылку GitHub. Оставьте его пустым для встроенного Repair Desk. [Репетиция и настройка AI с webhook](https://github.com/ROX54/server/blob/main/DEMO-GUIDE.md).

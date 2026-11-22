@@ -109,6 +109,7 @@
     moving = null;
     connection = null;
     id('name').value = graph.name;
+    id('repository').value = '';
     id('saved').value = key || '';
     remember(key);
     viewport.scrollTo(0, 0);
@@ -614,6 +615,7 @@
       runLabels[run.status], run.trigger === 'schedule' ? 'По расписанию' : 'Ручной запуск',
       localTime(run.startedAt || run.queuedAt), 'Находок: ' + run.findingCount,
       run.durationMs == null ? '' : run.durationMs + ' мс',
+      run.sourceStatus === 'loading' ? 'Загрузка учебного проекта' : '',
     ].filter(Boolean).join(' · ');
     panel.append(runNodeList(run));
     return true;
@@ -773,7 +775,8 @@
     if (busy || !storedId || dirty) return;
     setBusy(true);
     try {
-      const run = await request('/api/workflows/' + storedId + '/run', {});
+      const url = id('repository').value.trim();
+      const run = await request('/api/workflows/' + storedId + '/run', url ? {repository: url} : {});
       runVersion += 1;
       pinnedRun = '';
       showRun(run);

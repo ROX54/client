@@ -37,6 +37,7 @@ body {
 .wf-field { display: grid; gap: 5px; color: var(--wf-muted); font-size: 12px; min-width: 0; }
 .wf-toolbar .wf-field { flex: 1 1 155px; }
 .wf-toolbar .wf-title { flex: 2 1 170px; }
+.wf-source { max-width: 580px; margin: 0 0 12px; }
 .wf-field input, .wf-field select, .wf-actions button, .wf-remove, .wf-check {
   min-height: 38px;
   border-radius: 7px;
